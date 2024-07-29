@@ -4,6 +4,16 @@ library(tidyr)
 library(purrr)
 library(pins)
 
+## Attempt to update the meetup list from github
+url  <- "https://github.com/ansible-community/stats-container-meetups/raw/main/meetups.yml"
+req  <- httr2::request(url) |> httr2::req_retry(max_tries = 5)
+resp <- httr2::req_perform(req)
+if (httr2::resp_status(resp) == 200) {
+  resp |>
+    httr2::resp_body_string() |>
+    readr::write_file('/srv/docker-config/meetup/meetups.yml')
+}
+
 # Loaded from the config mount-point
 meetupr::meetup_auth('/srv/docker-config/meetup/httr-oauth.meetupr')
 meetups <- config::get(file = '/srv/docker-config/meetup/meetups.yml')

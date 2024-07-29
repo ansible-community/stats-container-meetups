@@ -31,7 +31,7 @@ I'm assuming a Gmail account in the code, just provide a file that looks like th
 
 ### Meetup config file
 
-Yaml file of white- and black-listed meetups. (TODO) The code actually downloads this file directly from GitHub, so just open PRs against it.
+Yaml file of white- and black-listed meetups. The code actually downloads this file directly from GitHub, so just open PRs against it.
 
 ## Build the container
 
