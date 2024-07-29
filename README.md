@@ -48,7 +48,7 @@ All the tasks are designed for a single execution
 This is the default action and builds a `pin` of the groups and events
 
 ```
-podman run --rm -ti -v /srv/docker-config/meetup/:/srv/docker-config/meetup/ -v /srv/docker-pins/meetup:/srv/docker-pins/meetup meetupr:latest
+podman run --rm -ti -v /srv/docker-config/meetup/:/srv/docker-config/meetup/ -v /srv/docker-pins/meetup:/srv/docker-pins/meetup meetupr:latest Rscript get_events.R
 ```
 
 ### Example single run of send_email.R
@@ -56,17 +56,21 @@ podman run --rm -ti -v /srv/docker-config/meetup/:/srv/docker-config/meetup/ -v 
 This renders `meetup_report.Rmd` and emails it
 
 ```
-podman run --rm -ti -v /srv/docker-config/meetup/:/srv/docker-config/meetup/ -v /srv/docker-pins/meetup:/srv/docker-pins/meetup meetupr:latest Rscript /opt/meetupr/send_email.R
+podman run --rm -ti -v /srv/docker-config/meetup/:/srv/docker-config/meetup/ -v /srv/docker-pins/meetup:/srv/docker-pins/meetup meetupr:latest Rscript send_email.R
 ```
 
 ### Example single run of the Discourse updater
 
-TODO
+Uses the API of Discourse to create events - requires a Discourse block in the config file, see the example.
+
+```
+podman run --rm -ti -v /srv/docker-config/meetup/:/srv/docker-config/meetup/ -v /srv/docker-pins/meetup:/srv/docker-pins/meetup meetupr:latest Rscript update_discourse.R
+```
 
 ### Interactive testing
 
-You can run an R shell in the container:
+You can run an R shell in the container - this is the container default:
 
 ```
-podman run --rm -ti -v /srv/docker-config/meetup/:/srv/docker-config/meetup/ -v /srv/docker-pins/meetup:/srv/docker-pins/meetup meetupr:latest R
+podman run --rm -ti -v /srv/docker-config/meetup/:/srv/docker-config/meetup/ -v /srv/docker-pins/meetup:/srv/docker-pins/meetup meetupr:latest
 ```

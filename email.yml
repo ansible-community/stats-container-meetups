@@ -1,4 +1,9 @@
 default:
+  discourse:
+    url: https://my.cool.forum.org
+    category: 1
+    api_key: mylongapikeyfromdiscourse
+    api_user: mybot
   email_config:
     username: "me@company.com"
     password: "app-passwords-are-great"

@@ -8,9 +8,7 @@ RUN mkdir -p /opt/meetupr
 WORKDIR /opt/meetupr
 COPY ./get_events.R .
 COPY ./send_email.R .
+COPY ./update_discourse.R .
 COPY ./meetup_report.Rmd .
 
-CMD ["Rscript", "./get_events.R"]
-
-# You can call R directly on the cmdline if you need it
-#CMD ["R"]
+CMD ["R"]
