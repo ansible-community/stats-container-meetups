@@ -1,0 +1,7 @@
+default:
+  email_config:
+    username: "me@company.com"
+    password: "app-passwords-are-great"
+  email_targets:
+    - you@somewhere.org
+    - them@community.net

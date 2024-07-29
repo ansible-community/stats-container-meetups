@@ -1,0 +1,260 @@
+---
+title: "Meetup Report"
+author: "Greg Sutcliffe"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_width: 9
+    fig_height: 4
+    fig_caption: yes
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+
+options(browser="firefox")
+library(tidyverse)
+library(glue)
+library(gt)
+library(pins)
+library(patchwork)
+library(httr)
+```
+
+```{r pins}
+board <- pins::board_folder('/srv/docker-pins/meetup')  
+
+groups <- pin_read(board, "groups")
+events <- pin_read(board, "events") |>
+  tidyr::drop_na(id) |>
+  left_join(select(groups,urlname,country), by = 'urlname') |>
+  mutate(is_online_event = venue_name == 'Online event',
+         Location = country)
+```
+
+# Meetup - Weekly Readout: `r format(Sys.Date(), '%d %B, %Y')`
+
+Current data on the Ansible Meetup Groups. Changes to which groups are tracked
+can be found
+[here](https://github.com/ansible-community/stats-crawler/blob/main/config/meetups.yml)
+
+## Meetup activity
+
+Data over the last 12 months-to-date, for all continents:
+
+```{r activity_plot}
+summary <- events %>%
+  filter(time >= Sys.Date() - months(12)) %>%
+  filter(status == 'PAST') %>%
+  group_by(urlname,Location) %>%
+  mutate(mean_rsvp = round(mean(going,na.rm = TRUE),0)) %>%
+  group_by(urlname,Location,mean_rsvp) %>%
+  do(
+    model = lm(going ~ time, data = .) %>% broom::tidy(),
+    n     = nrow(.),
+    v     = sum(.$is_online_event)
+  ) %>%
+  unnest(cols = c(model,n,v)) %>%
+  filter(term == 'time') %>%
+  replace_na(list(v = 0, p.value = 1)) %>%
+  mutate(estimate = estimate*60*60*24, #rsvps / second -> rsvps / day
+         trend = case_when(
+           p.value  > 0.3 ~ '&#8605;', # squiggle
+           estimate > 0   ~ '&#8599;', # up
+           estimate < 0   ~ '&#8600;', # down
+           TRUE           ~ '??'  # WTF
+         ),
+         trend = glue("<span style='font-size:20px;'>{trend}</span>")) %>%
+  arrange(-n) %>%
+  select(-term,-statistic,-std.error,-estimate,-p.value) %>%
+  rename(Name = urlname,
+         Events = n, `Virtual Events` = v,
+         Mean_RSVP = mean_rsvp, RSVP_Trend = trend) %>%
+  ungroup()
+  
+summary %>%
+  head(15) %>%
+  mutate(Name = str_remove(Name,'Ansible-')) %>%
+  ggplot(aes(x=fct_reorder(Name,-Events),y=Events,fill=Mean_RSVP)) +
+  geom_bar(stat='identity') +
+#  scale_y_discrete() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "grey", midpoint = mean(summary$Mean_RSVP)) +
+  theme(axis.text.x = element_text(angle = 70, hjust=1)) +
+  xlab('Meetup Name') +
+  ylab('Events in the last year')
+```
+
+```{r activity_table}
+summary %>%
+  head(15) %>%
+  mutate(Name = glue('[{Name}](https://meeup.com/{Name})')) %>%
+  gt() %>%
+  fmt_markdown(c('Name','RSVP_Trend'))
+```
+
+## Global summaries
+
+Table of past meetup totals by geography, last 12 months:
+
+```{r totals_table}
+this_month = cut(Sys.Date(),'month') |> as.Date()
+start = this_month - months(13)
+
+events |>
+  filter(status == 'PAST') |>
+  filter(time >= start & time < this_month) |>
+#  mutate(month = cut(time, 'month') |> as.Date()) |>
+  drop_na() |>
+  count(Location, is_online_event) |>
+  pivot_wider(names_from = is_online_event, values_from = n) |>
+  rename(Physical = `FALSE`, Virtual = `TRUE`) |>
+  replace_na(list(Physical = 0, Virtual = 0)) |>
+  do(bind_rows(., data.frame(Location="Total",
+                             count(., name = "Physical", wt = Physical),
+                             count(., name = "Virtual", wt = Virtual)))) |>
+  gt()
+```
+
+Trends in "number of events" and "number of RSVPs", last 12 months, split by type:
+
+```{r global_trends}
+events |>
+  filter(status == 'PAST') |>
+  mutate(month = cut(time, 'month') |> as.Date()) |>
+  select(month, going, is_online_event) |>
+  count(month, is_online_event, wt = going, name = "going") -> rsvps
+
+events |>
+  filter(status == 'PAST') |>
+  mutate(month = cut(time, 'month') |> as.Date()) |>
+  select(month, title, going, is_online_event) |>
+  count(month, is_online_event) |>
+  left_join(rsvps, by = c("month","is_online_event")) |>
+  drop_na() -> df
+
+df |>
+  filter(month >= start) |>
+  filter(month < this_month) |>
+  ggplot(aes(x = month, y = n, colour = is_online_event, size = going)) +
+  geom_point() +
+  geom_smooth(method='lm', se = F) +
+  theme_minimal() +
+  labs(title = "Global Meetup Events / month",
+       subtitle = "Last 12 months, size = total RSVPs",
+       x = "Month", y = "# of events",
+       caption = "Source: Meetup API") -> p1
+df |>
+  filter(month >= start) |>
+  filter(month < this_month) |>
+  ggplot(aes(x = month, y = going, colour = is_online_event, size = n)) +
+  geom_point() +
+  geom_smooth(method='lm', se = F) +
+  theme_minimal() +
+  labs(title = "Global Meetup Signups / month",
+       subtitle = "Last 12 months, size = total events",
+       x = "Month", y = "# of signups",
+       caption = "Source: Meetup API") -> p2
+```
+
+```{r global_trends_plots}
+p1 + p2 + plot_layout(guides = 'collect')
+```
+## Upcoming meetups
+
+All the events where `status = upcoming` and the event time is in the next 3
+months:
+
+```{r upcoming-data}
+# These also need to be posted to Discourse...
+# TODO this needs to be handled separately
+#source('discourse.R')
+
+events %>%
+  distinct(id, .keep_all = T) %>%
+  filter(time > Sys.Date() - lubridate::days(1)) %>%
+  filter(time <= Sys.Date() + 90) %>%
+  filter(status == 'published') %>%
+  #push_to_discourse() %>%
+  arrange(time) %>%
+  transmute(Event = glue('[{title}]({link})'), 
+            time = as.Date(time), Location,
+            Group = glue('[{urlname}](https://meetup.com/{urlname})'),
+            going, waiting, is_online_event,
+            #result = glue('[Discourse]({result})')
+  ) -> up_events
+```
+
+```{r upcoming}
+up_events %>%
+  gt() %>%
+  #fmt_markdown(columns = c('Event','Group', 'result')) %>%
+  fmt_markdown(columns = c('Event','Group')) %>%
+  cols_label(
+    time = "Date",
+    going = "Going", waiting = "Waitlist",
+    is_online_event = 'Virtual?',
+    #result = 'Discourse'
+  )
+```
+
+## Recent events
+
+All the events where `status = past` and the event time is in the last month:
+
+```{r recent}
+events %>%
+  distinct(id, .keep_all = T) %>%
+  filter(time >= Sys.Date() - months(1)) %>%
+  filter(status == 'PAST') %>%
+  arrange(desc(time)) %>%
+  transmute(Event = glue('[{title}]({link})'),
+            time = as.Date(time), Location,
+            going, waiting, is_online_event,
+            Group = glue('[{urlname}](https://meetup.com/{urlname})')) %>%
+  gt() %>%
+  fmt_markdown(columns = c('Group','Event')) %>%
+  cols_label(
+    time = "Date",
+    going = "Went", waiting = "Waitlist",
+    is_online_event = 'Virtual?'
+  )
+```
+
+<!-- ## Untracked groups -->
+
+<!-- **Currently broken** -->
+
+<!-- Groups returned from the Meetup API that are not in the config under either -->
+<!-- `allowlist` or `ignorelist`. Add a group to either place to remove it from here. -->
+
+<!-- ```{r eval=FALSE} -->
+<!-- raw_groups %>% -->
+<!--   anti_join(enframe(config$allowlist), by = c('urlname' = 'value')) %>% -->
+<!--   mutate( -->
+<!--     url  = paste0('https://meetup.com/',urlname), -->
+<!--     Name = map2_chr(name,url, ~ toString(htmltools::tags$a(href=.y,.x)))) %>% -->
+<!--   select(Name,city,country,next_event, upcoming_event_count) -> untracked -->
+<!-- ``` -->
+
+<!-- There are currently 0 groups that we do not track or ignore, -->
+<!-- so only the top 10 (by upcoming event count) are shown here. -->
+
+<!-- ```{r eval=FALSE} -->
+<!-- untracked %>% -->
+<!--   arrange(-upcoming_event_count) %>% -->
+<!--   head(10) %>% -->
+<!--   gt() %>% -->
+<!--   fmt_markdown(columns = 'Name') %>% -->
+<!--     cols_label( -->
+<!--     city = "City", -->
+<!--     country = "Country", -->
+<!--     next_event = "Next Event", -->
+<!--     upcoming_event_count = '# Upcoming events' -->
+<!--   ) -->
+<!-- ``` -->
+
