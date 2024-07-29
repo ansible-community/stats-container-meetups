@@ -6,7 +6,7 @@ date <- Sys.Date()
 
 msg <- emayili::envelope() |>
   emayili::from("gsutclif+ds@redhat.com") |>
-  emayili::to(paste0(config$email_targets, collapse = ', ')) |>
+  emayili::to(config$email_targets) |>
   emayili::subject(paste0("Meetup report - ", date)) |>
   emayili::render('meetup_report.Rmd',
                   include_css = c("rmd", "bootstrap"))
