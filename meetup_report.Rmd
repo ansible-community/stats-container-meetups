@@ -105,15 +105,20 @@ Table of past meetup totals by geography, last 12 months:
 this_month = cut(Sys.Date(),'month') |> as.Date()
 start = this_month - months(13)
 
+# Use pivot_wider_spec to ensure both columns exist even if
+# the events are all of one type
+pivot_spec <- tibble(
+  .name = c("Virtual", "Physical"),
+  .value = c("n", "n"),
+  is_online_event = c(TRUE,FALSE)
+)
+
 events |>
   filter(status == 'PAST') |>
   filter(time >= start & time < this_month) |>
-#  mutate(month = cut(time, 'month') |> as.Date()) |>
   drop_na() |>
   count(Location, is_online_event) |>
-  pivot_wider(names_from = is_online_event, values_from = n) |>
-  rename(Physical = `FALSE`, Virtual = `TRUE`) |>
-  replace_na(list(Physical = 0, Virtual = 0)) |>
+  pivot_wider_spec(pivot_spec, values_fill = 0) |>
   do(bind_rows(., data.frame(Location="Total",
                              count(., name = "Physical", wt = Physical),
                              count(., name = "Virtual", wt = Virtual)))) |>
