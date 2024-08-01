@@ -50,3 +50,6 @@ po/*~
 /renv/
 /renv.lock
 
+# Ignore symlink dirs
+/config/
+/pins/
