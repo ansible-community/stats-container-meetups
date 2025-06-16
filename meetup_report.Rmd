@@ -92,7 +92,7 @@ summary %>%
 ```{r activity_table}
 summary %>%
   head(15) %>%
-  mutate(Name = glue('[{Name}](https://meeup.com/{Name})')) %>%
+  mutate(Name = glue('[{Name}](https://meetup.com/{Name})')) %>%
   gt() %>%
   fmt_markdown(c('Name','RSVP_Trend'))
 ```
