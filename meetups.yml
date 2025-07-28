@@ -57,6 +57,7 @@ default:
     - Ansible-Houston
     - Ansible-Hyderabad
     - Ansible-in-DevOps-Torun-Bydgoszcz
+    - Ansible-India
     - Ansible-Indianapolis
     - ansible-iraq
     - Ansible-Ireland
@@ -140,4 +141,5 @@ default:
   # Meetups we are sure we don't want to track
   ignorelist:
     - currently-this-is-an-empty-list
+    - ansible-virtual-meetups
 
