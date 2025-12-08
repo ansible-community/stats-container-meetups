@@ -15,14 +15,13 @@ if (httr2::resp_status(resp) == 200) {
 }
 
 # Loaded from the config mount-point
-meetupr::meetup_auth('/srv/docker-config/meetup/httr-oauth.meetupr')
+source('/srv/docker-config/meetup/meetup.env')
+meetup_ci_load()
+
 meetups <- config::get(file = '/srv/docker-config/meetup/meetups.yml')
 board <- pins::board_folder('/srv/docker-pins/meetup')
 
-groups <- meetupr::find_groups(
-  'Ansible',
-  topic_category_id = 546
-) |>
+groups <- meetupr::get_pro_groups('Ansible') |>
   distinct(urlname, .keep_all = T) |>
   filter(stringr::str_to_lower(urlname) %in% stringr::str_to_lower(meetups$allowlist))
 
@@ -32,15 +31,14 @@ pins::pin_write(board, groups,
 groups <- groups |>
   transmute(group.id = id, urlname)
 
-possibly_get_events <- possibly(meetupr:::get_events,
+possibly_get_events <- possibly(meetupr:::get_group_events,
                                 otherwise = NA)
 
 events <- groups |>
   rowwise() |>
   mutate(data = map(urlname, possibly_get_events)) |>
-  unnest(data) |>
-  drop_na(status) |>
-  mutate(event_status = status)
+  unnest(data,names_sep='.') |>
+  mutate(event_status = data.status)
 
 pins::pin_write(board, events,
                 name = "events")
