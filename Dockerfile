@@ -1,5 +1,10 @@
 FROM rocker/tidyverse:latest
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libsecret-1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN install2.r config emayili gt patchwork pins remotes \
     && rm -rf /tmp/downloaded_packages
 RUN R -q -e 'remotes::install_github("rladies/meetupr")'
