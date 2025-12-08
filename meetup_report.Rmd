@@ -33,7 +33,7 @@ groups <- pin_read(board, "groups")
 events <- pin_read(board, "events") |>
   tidyr::drop_na(id) |>
   left_join(select(groups,urlname,country), by = 'urlname') |>
-  mutate(is_online_event = venue_name == 'Online event',
+  mutate(is_online_event = venues_venue_type == 'online' | venues_name == 'Online event',
          Location = country)
 ```
 
@@ -49,18 +49,18 @@ Data over the last 12 months-to-date, for all continents:
 
 ```{r activity_plot}
 summary <- events %>%
-  filter(time >= Sys.Date() - months(12)) %>%
+  filter(date_time >= Sys.Date() - months(12)) %>%
   filter(status == 'PAST') %>%
   group_by(urlname,Location) %>%
-  mutate(mean_rsvp = round(mean(going,na.rm = TRUE),0)) %>%
+  mutate(mean_rsvp = round(mean(rsvps_total_count,na.rm = TRUE),0)) %>%
   group_by(urlname,Location,mean_rsvp) %>%
   do(
-    model = lm(going ~ time, data = .) %>% broom::tidy(),
+    model = lm(rsvps_total_count ~ date_time, data = .) %>% broom::tidy(),
     n     = nrow(.),
     v     = sum(.$is_online_event)
   ) %>%
   unnest(cols = c(model,n,v)) %>%
-  filter(term == 'time') %>%
+  filter(term == 'date_time') %>%
   replace_na(list(v = 0, p.value = 1)) %>%
   mutate(estimate = estimate*60*60*24, #rsvps / second -> rsvps / day
          trend = case_when(
@@ -115,7 +115,7 @@ pivot_spec <- tibble(
 
 events |>
   filter(status == 'PAST') |>
-  filter(time >= start & time < this_month) |>
+  filter(date_time >= start & date_time < this_month) |>
   drop_na() |>
   count(Location, is_online_event) |>
   pivot_wider_spec(pivot_spec, values_fill = 0) |>
@@ -130,14 +130,14 @@ Trends in "number of events" and "number of RSVPs", last 12 months, split by typ
 ```{r global_trends}
 events |>
   filter(status == 'PAST') |>
-  mutate(month = cut(time, 'month') |> as.Date()) |>
-  select(month, going, is_online_event) |>
-  count(month, is_online_event, wt = going, name = "going") -> rsvps
+  mutate(month = cut(date_time, 'month') |> as.Date()) |>
+  select(month, rsvps_total_count, is_online_event) |>
+  count(month, is_online_event, wt = rsvps_total_count, name = "rsvps_total_count") -> rsvps
 
 events |>
   filter(status == 'PAST') |>
-  mutate(month = cut(time, 'month') |> as.Date()) |>
-  select(month, title, going, is_online_event) |>
+  mutate(month = cut(date_time, 'month') |> as.Date()) |>
+  select(month, title, rsvps_total_count, is_online_event) |>
   count(month, is_online_event) |>
   left_join(rsvps, by = c("month","is_online_event")) |>
   drop_na() -> df
@@ -145,7 +145,7 @@ events |>
 df |>
   filter(month >= start) |>
   filter(month < this_month) |>
-  ggplot(aes(x = month, y = n, colour = is_online_event, size = going)) +
+  ggplot(aes(x = month, y = n, colour = is_online_event, size = rsvps_total_count)) +
   geom_point() +
   geom_smooth(method='lm', se = F) +
   theme_minimal() +
@@ -156,7 +156,7 @@ df |>
 df |>
   filter(month >= start) |>
   filter(month < this_month) |>
-  ggplot(aes(x = month, y = going, colour = is_online_event, size = n)) +
+  ggplot(aes(x = month, y = rsvps_total_count, colour = is_online_event, size = n)) +
   geom_point() +
   geom_smooth(method='lm', se = F) +
   theme_minimal() +
@@ -181,15 +181,15 @@ months:
 
 events %>%
   distinct(id, .keep_all = T) %>%
-  filter(time > Sys.Date() - lubridate::days(1)) %>%
-  filter(time <= Sys.Date() + 90) %>%
-  filter(status == 'published') %>%
+  filter(date_time > Sys.Date() - lubridate::days(1)) %>%
+  filter(date_time <= Sys.Date() + 90) %>%
+  filter(status %in% c('ACTIVE', 'PENDING')) %>%
   #push_to_discourse() %>%
-  arrange(time) %>%
-  transmute(Event = glue('[{title}]({link})'), 
-            time = as.Date(time), Location,
+  arrange(date_time) %>%
+  transmute(Event = glue('[{title}]({event_url})'), 
+            date_time = as.Date(date_time), Location,
             Group = glue('[{urlname}](https://meetup.com/{urlname})'),
-            going, waiting, is_online_event,
+            rsvps_total_count, is_online_event,
             #result = glue('[Discourse]({result})')
   ) -> up_events
 ```
@@ -200,8 +200,8 @@ up_events %>%
   #fmt_markdown(columns = c('Event','Group', 'result')) %>%
   fmt_markdown(columns = c('Event','Group')) %>%
   cols_label(
-    time = "Date",
-    going = "Going", waiting = "Waitlist",
+    date_time = "Date",
+    rsvps_total_count = "Going",
     is_online_event = 'Virtual?',
     #result = 'Discourse'
   )
@@ -214,18 +214,18 @@ All the events where `status = past` and the event time is in the last month:
 ```{r recent}
 events %>%
   distinct(id, .keep_all = T) %>%
-  filter(time >= Sys.Date() - months(1)) %>%
+  filter(date_time >= Sys.Date() - months(1)) %>%
   filter(status == 'PAST') %>%
-  arrange(desc(time)) %>%
-  transmute(Event = glue('[{title}]({link})'),
-            time = as.Date(time), Location,
-            going, waiting, is_online_event,
+  arrange(desc(date_time)) %>%
+  transmute(Event = glue('[{title}]({event_url})'),
+            date_time = as.Date(date_time), Location,
+            rsvps_total_count, is_online_event,
             Group = glue('[{urlname}](https://meetup.com/{urlname})')) %>%
   gt() %>%
   fmt_markdown(columns = c('Group','Event')) %>%
   cols_label(
-    time = "Date",
-    going = "Went", waiting = "Waitlist",
+    date_time = "Date",
+    rsvps_total_count = "Went",
     is_online_event = 'Virtual?'
   )
 ```

@@ -16,7 +16,7 @@ if (httr2::resp_status(resp) == 200) {
 
 # Loaded from the config mount-point
 source('/srv/docker-config/meetup/meetup.env')
-meetup_ci_load()
+meetupr::meetup_ci_load()
 
 meetups <- config::get(file = '/srv/docker-config/meetup/meetups.yml')
 board <- pins::board_folder('/srv/docker-pins/meetup')
@@ -31,14 +31,14 @@ pins::pin_write(board, groups,
 groups <- groups |>
   transmute(group.id = id, urlname)
 
-possibly_get_events <- possibly(meetupr:::get_group_events,
+possibly_get_events <- possibly(meetupr::get_group_events,
                                 otherwise = NA)
 
 events <- groups |>
   rowwise() |>
-  mutate(data = map(urlname, possibly_get_events)) |>
-  unnest(data,names_sep='.') |>
-  mutate(event_status = data.status)
+  mutate(events_data = map(urlname, possibly_get_events)) |>
+  unnest(events_data, keep_empty = TRUE) |>
+  filter(!is.na(id))
 
 pins::pin_write(board, events,
                 name = "events")

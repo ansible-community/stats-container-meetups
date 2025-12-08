@@ -61,11 +61,11 @@ push_to_discourse <- function(e) {
   }
 
   # helper
-  build_body <- function(urlname, eventname, link, time, description) {
-    title <- stringr::str_c(urlname, ": ", eventname, " [", as.Date(time), "]")
+  build_body <- function(urlname, eventname, event_url, date_time, description) {
+    title <- stringr::str_c(urlname, ": ", eventname, " [", as.Date(date_time), "]")
     raw <- "[event "
-    raw <- stringr::str_c(raw, "url='", link, "' ")
-    raw <- stringr::str_c(raw, "start='", as.Date(time), "' ")
+    raw <- stringr::str_c(raw, "url='", event_url, "' ")
+    raw <- stringr::str_c(raw, "start='", as.Date(date_time), "' ")
     raw <- stringr::str_c(raw, "status='public' ")
     raw <- stringr::str_c(raw, "]\n[/event]")
     raw <- stringr::str_c(raw, "\n", description)
@@ -74,8 +74,8 @@ push_to_discourse <- function(e) {
   }
 
   ## PUT updates to existing events
-  update_event <- function(post_id, topic_id, urlname, eventname, link, time, description) {
-    r     <- build_body(urlname, eventname, link, time, description)
+  update_event <- function(post_id, topic_id, urlname, eventname, event_url, date_time, description) {
+    r     <- build_body(urlname, eventname, event_url, date_time, description)
     title <- r$title
     raw   <- r$raw
 
@@ -103,8 +103,8 @@ push_to_discourse <- function(e) {
   }
 
   ## Post new events
-  post_event <- function(urlname, eventname, link, time, id, description) {
-    r     <- build_body(urlname, eventname, link, time, description)
+  post_event <- function(urlname, eventname, event_url, date_time, id, description) {
+    r     <- build_body(urlname, eventname, event_url, date_time, description)
     title <- r$title
     raw   <- r$raw
 
@@ -135,14 +135,14 @@ push_to_discourse <- function(e) {
     mutate(result = pmap_chr(
       list(post_id = post_id, topic_id = topic_id,
            urlname = urlname, eventname = title,
-           link = link, time = time, description = description),
+           event_url = event_url, date_time = date_time, description = description),
       update_event)) -> updated
 
   ## POST events that don't exist
   anti_join(e, existing_meetups, by = c("id" = "meetup_id")) |>
     mutate(result = pmap_chr(
       list(urlname = urlname, eventname = title,
-           link = link, id = id, time = time, description = description),
+           event_url = event_url, id = id, date_time = date_time, description = description),
       post_event)) -> new
 
   return(
@@ -155,20 +155,19 @@ groups <- pin_read(board, "groups")
 events <- pin_read(board, "events") |>
   tidyr::drop_na(id) |>
   left_join(select(groups,urlname,country), by = 'urlname') |>
-  mutate(is_online_event = venue_name == 'Online event',
+  mutate(is_online_event = venues_venue_type == 'online' | venues_name == 'Online event',
          Location = country)
 
 events |>
   distinct(id, .keep_all = T) |>
-  filter(time > Sys.Date() - lubridate::days(1)) |>
-  filter(time <= Sys.Date() + 90) |>
-  filter(status == 'published') |>
+  filter(date_time > Sys.Date() - lubridate::days(1)) |>
+  filter(date_time <= Sys.Date() + 90) |>
+  filter(status == 'ACTIVE') |>
   push_to_discourse() |>
-  arrange(time) %>%
+  arrange(date_time) %>%
   transmute(Event = title,
-            time = as.Date(time),
+            date_time = as.Date(date_time),
             Location,
             Group = urlname,
-            going,
-            waiting,
+            rsvps_total_count,
             result)
