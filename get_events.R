@@ -34,11 +34,24 @@ groups <- groups |>
 possibly_get_events <- possibly(meetupr:::get_group_events,
                                 otherwise = NA)
 
+# We want this format for events:
+# > readr::read_rds('/tmp/events.rds') |> names()
+#  [1] "group.id"      "urlname"       "id"            "title"
+#  [5] "link"          "status"        "time"          "duration"
+#  [9] "going"         "waiting"       "description"   "venue_id"
+# [13] "venue_lat"     "venue_lon"     "venue_name"    "venue_address"
+# [17] "venue_city"    "venue_state"   "venue_zip"     "venue_country"
+# [21] "event_status"
+
 events <- groups |>
   rowwise() |>
   mutate(data = map(urlname, possibly_get_events)) |>
-  unnest(data,names_sep='.') |>
-  mutate(event_status = data.status)
+  unnest(data) |>
+  mutate(event_status = status,
+         time = date_time,
+         going = rsvps_count,
+         link = event_url,
+         venue_name = venues_name)
 
 pins::pin_write(board, events,
                 name = "events")

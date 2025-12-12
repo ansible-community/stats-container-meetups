@@ -189,7 +189,7 @@ events %>%
   transmute(Event = glue('[{title}]({link})'), 
             time = as.Date(time), Location,
             Group = glue('[{urlname}](https://meetup.com/{urlname})'),
-            going, waiting, is_online_event,
+            going, is_online_event,
             #result = glue('[Discourse]({result})')
   ) -> up_events
 ```
@@ -201,7 +201,7 @@ up_events %>%
   fmt_markdown(columns = c('Event','Group')) %>%
   cols_label(
     time = "Date",
-    going = "Going", waiting = "Waitlist",
+    going = "Going",
     is_online_event = 'Virtual?',
     #result = 'Discourse'
   )
@@ -219,13 +219,13 @@ events %>%
   arrange(desc(time)) %>%
   transmute(Event = glue('[{title}]({link})'),
             time = as.Date(time), Location,
-            going, waiting, is_online_event,
+            going, is_online_event,
             Group = glue('[{urlname}](https://meetup.com/{urlname})')) %>%
   gt() %>%
   fmt_markdown(columns = c('Group','Event')) %>%
   cols_label(
     time = "Date",
-    going = "Went", waiting = "Waitlist",
+    going = "Went",
     is_online_event = 'Virtual?'
   )
 ```
