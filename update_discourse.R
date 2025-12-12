@@ -162,7 +162,7 @@ events |>
   distinct(id, .keep_all = T) |>
   filter(time > Sys.Date() - lubridate::days(1)) |>
   filter(time <= Sys.Date() + 90) |>
-  filter(status == 'published') |>
+  filter(status == 'ACTIVE') |>
   push_to_discourse() |>
   arrange(time) %>%
   transmute(Event = title,
@@ -170,5 +170,4 @@ events |>
             Location,
             Group = urlname,
             going,
-            waiting,
             result)
