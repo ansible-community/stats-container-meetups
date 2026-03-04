@@ -1,0 +1,28 @@
+[project]
+name = "stats-container-meetups-python"
+version = "1.0.0"
+description = "Sync Ansible community meetup events to Discourse"
+requires-python = ">=3.12"
+
+[tool.black]
+line-length = 160
+
+[tool.ruff]
+line-length = 160
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM", "RUF"]
+
+[tool.isort]
+profile = "black"
+line_length = 160
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
