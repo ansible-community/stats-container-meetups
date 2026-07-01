@@ -154,8 +154,27 @@ class SyncSummary:
 # ---------------------------------------------------------------------------
 
 
+def generate_meetup_jwt(config: Config, private_key: str) -> str:
+    """Create a signed JWT for Meetup API authentication."""
+    now = time.time()
+    payload = {
+        "sub": config.meetup_member_id,
+        "iss": config.meetup_client_key,
+        "aud": "api.meetup.com",
+        "exp": int(now) + 120,
+    }
+    headers = {
+        "kid": config.meetup_signing_key_id,
+        "typ": "JWT",
+        "alg": "RS256",
+    }
+    return jwt.encode(payload, private_key, algorithm="RS256", headers=headers)
+
+
 class MeetupClient:
     """Client for the Meetup GraphQL API with JWT OAuth2 authentication."""
+
+    REQUEST_TIMEOUT = (10, 30)
 
     def __init__(self, config: Config) -> None:
         self._config = config
@@ -174,19 +193,7 @@ class MeetupClient:
 
     def _generate_jwt(self) -> str:
         """Create a signed JWT for Meetup API authentication."""
-        now = time.time()
-        payload = {
-            "sub": self._config.meetup_member_id,
-            "iss": self._config.meetup_client_key,
-            "aud": "api.meetup.com",
-            "exp": int(now) + 120,
-        }
-        headers = {
-            "kid": self._config.meetup_signing_key_id,
-            "typ": "JWT",
-            "alg": "RS256",
-        }
-        return jwt.encode(payload, self._private_key, algorithm="RS256", headers=headers)
+        return generate_meetup_jwt(self._config, self._private_key)
 
     def _ensure_token(self) -> None:
         """Obtain or refresh the access token."""
@@ -200,10 +207,11 @@ class MeetupClient:
                 "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
                 "assertion": signed_jwt,
             },
+            timeout=self.REQUEST_TIMEOUT,
         )
 
         if resp.status_code != 200:
-            log.error("Meetup auth failed (HTTP %d): %s", resp.status_code, resp.text)
+            log.error("Meetup auth failed (HTTP %d): %s", resp.status_code, resp.text[:200])
             # Retry once
             resp = self._session.post(
                 self._config.meetup_token_url,
@@ -211,9 +219,10 @@ class MeetupClient:
                     "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
                     "assertion": self._generate_jwt(),
                 },
+                timeout=self.REQUEST_TIMEOUT,
             )
             if resp.status_code != 200:
-                log.error("Meetup auth retry failed (HTTP %d): %s", resp.status_code, resp.text)
+                log.error("Meetup auth retry failed (HTTP %d): %s", resp.status_code, resp.text[:200])
                 sys.exit(1)
 
         token_data = resp.json()
@@ -234,6 +243,7 @@ class MeetupClient:
                 self._config.meetup_api_url,
                 json={"query": query, "variables": variables or {}},
                 headers={"Authorization": f"Bearer {self._access_token}"},
+                timeout=self.REQUEST_TIMEOUT,
             )
 
             if resp.status_code == 200:
@@ -432,6 +442,8 @@ class MeetupClient:
 class DiscourseClient:
     """Client for the Discourse API."""
 
+    REQUEST_TIMEOUT = (10, 30)
+
     def __init__(self, config: Config, category: int) -> None:
         self._config = config
         self._category = category
@@ -445,10 +457,14 @@ class DiscourseClient:
         self._base_url = config.discourse_url.rstrip("/")
 
     def lookup_topic(self, external_id: str) -> dict[str, Any] | None:
-        """Look up a topic by external_id. Returns topic data or None if not found."""
+        """Look up a topic by external_id. Returns topic data or None if not found.
+
+        Raises requests.RequestException on non-404/non-200 responses so callers
+        can distinguish "not found" from "lookup failed".
+        """
         url = f"{self._base_url}/t/external_id/{external_id}.json"
         for _attempt in range(2):
-            resp = self._session.get(url, params={"include_raw": "1"})
+            resp = self._session.get(url, params={"include_raw": "1"}, timeout=self.REQUEST_TIMEOUT)
             if not self._handle_rate_limit(resp):
                 break
 
@@ -459,12 +475,15 @@ class DiscourseClient:
             return None
 
         log.warning("Discourse lookup unexpected status %d for %s", resp.status_code, external_id)
-        return None
+        raise requests.RequestException(f"Lookup failed with status {resp.status_code}")
 
     def _handle_rate_limit(self, resp: requests.Response) -> bool:
         """Wait if rate limited by Discourse. Returns True if rate limited (caller should retry)."""
         if resp.status_code == 429:
-            retry_after = int(resp.headers.get("Retry-After", 10))
+            try:
+                retry_after = int(resp.headers.get("Retry-After", 10))
+            except (ValueError, TypeError):
+                retry_after = 10
             log.warning("Discourse rate limited, waiting %ds...", retry_after)
             time.sleep(retry_after)
             return True
@@ -482,6 +501,7 @@ class DiscourseClient:
                     "tags": ["meetup"],
                     "external_id": external_id,
                 },
+                timeout=self.REQUEST_TIMEOUT,
             )
             if not self._handle_rate_limit(resp):
                 break
@@ -503,6 +523,7 @@ class DiscourseClient:
             resp = self._session.put(
                 f"{self._base_url}/t/-/{topic_id}.json",
                 json={"title": title, "category": self._category},
+                timeout=self.REQUEST_TIMEOUT,
             )
             if not self._handle_rate_limit(resp):
                 break
@@ -518,6 +539,7 @@ class DiscourseClient:
             resp = self._session.put(
                 f"{self._base_url}/posts/{post_id}.json",
                 json={"post": {"raw": raw, "edit_reason": "Meetup event updated"}},
+                timeout=self.REQUEST_TIMEOUT,
             )
             if not self._handle_rate_limit(resp):
                 break
@@ -551,7 +573,8 @@ def build_post_body(event: MeetupEvent) -> str:
         end_dt = dt + duration_td
         end_iso = end_dt.isoformat(timespec="milliseconds")
 
-    tz_attr = f' timezone="{event.event_timezone}"' if event.event_timezone else ""
+    safe_tz = event.event_timezone.replace('"', "'") if event.event_timezone else None
+    tz_attr = f' timezone="{safe_tz}"' if safe_tz else ""
 
     safe_title = event.title.replace('"', "'")
     safe_url = event.event_url.replace('"', "'")
@@ -581,8 +604,9 @@ def build_post_body(event: MeetupEvent) -> str:
             venue_parts.append(event.venue_country)
         body_parts.append(f"**Venue:** {', '.join(venue_parts)}")
 
+    safe_link_url = event.event_url.replace(")", "%29")
     body_parts.append("")
-    body_parts.append(f"**RSVP on Meetup:** [View event on Meetup]({event.event_url})")
+    body_parts.append(f"**RSVP on Meetup:** [View event on Meetup]({safe_link_url})")
 
     return "\n".join(body_parts)
 
@@ -770,15 +794,7 @@ def validate_config(config: Config) -> bool:
 
     # Check 3 & 4: Meetup token endpoint reachable and access token obtained
     try:
-        now = time.time()
-        payload = {
-            "sub": config.meetup_member_id,
-            "iss": config.meetup_client_key,
-            "aud": "api.meetup.com",
-            "exp": int(now) + 120,
-        }
-        headers = {"kid": config.meetup_signing_key_id, "typ": "JWT", "alg": "RS256"}
-        signed_jwt = jwt.encode(payload, private_key, algorithm="RS256", headers=headers)
+        signed_jwt = generate_meetup_jwt(config, private_key)
 
         session = requests.Session()
         resp = session.post(
@@ -1015,7 +1031,10 @@ def sync_event(event: MeetupEvent, discourse: DiscourseClient, external_id_prefi
         changes.append("body")
 
     update_ok = True
-    if body_changed and first_post_id is not None and not discourse.update_post_body(first_post_id, body):
+    if body_changed and first_post_id is None:
+        log.warning("Cannot update body: no post ID for topic %d", topic_id)
+        update_ok = False
+    elif body_changed and first_post_id is not None and not discourse.update_post_body(first_post_id, body):
         update_ok = False
     if title_changed and not discourse.update_topic_title(topic_id, title):
         update_ok = False

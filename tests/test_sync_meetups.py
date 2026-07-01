@@ -13,7 +13,9 @@ import requests
 from sync_meetups import (
     Config,
     DiscourseClient,
+    MeetupClient,
     MeetupEvent,
+    SyncResult,
     build_post_body,
     build_post_title,
     deduplicate_events,
@@ -22,6 +24,7 @@ from sync_meetups import (
     parse_args,
     parse_duration,
     parse_event_datetime,
+    run_sync,
     sync_event,
     validate_config,
 )
@@ -980,7 +983,7 @@ class TestSyncEvent:
         assert result.action == "error"
 
     def test_update_with_malformed_post_data(self, sample_event: MeetupEvent, sample_config: Config) -> None:
-        """Post missing 'id' field should not raise KeyError."""
+        """Post missing 'id' field should report error, not silently skip body update."""
         discourse = DiscourseClient(sample_config, category=42)
         with (
             patch.object(
@@ -997,8 +1000,7 @@ class TestSyncEvent:
         ):
             result = sync_event(sample_event, discourse)
 
-        assert result.action == "updated"
-        mock_title.assert_called_once()
+        assert result.action == "error"
         mock_body.assert_not_called()
 
     def test_network_event_uses_network_id(self, sample_config: Config) -> None:
@@ -1497,3 +1499,296 @@ class TestValidateConfig:
             result = validate_config(config)
 
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# GraphQL retry tests
+# ---------------------------------------------------------------------------
+
+
+class TestGraphQLRetry:
+    def test_retries_on_500_with_backoff(self, sample_config: Config) -> None:
+        client = MeetupClient(sample_config)
+        client._access_token = "fake-token"
+        client._token_expires_at = 9999999999.0
+
+        responses = [
+            MockResponse(500, text="server error"),
+            MockResponse(500, text="server error"),
+            MockResponse(200, json_data={"data": {"result": True}}),
+        ]
+        call_count = 0
+
+        def mock_post(*args: Any, **kwargs: Any) -> MockResponse:
+            nonlocal call_count
+            resp = responses[call_count]
+            call_count += 1
+            return resp
+
+        with patch.object(client._session, "post", side_effect=mock_post), patch("sync_meetups.time.sleep") as mock_sleep:
+            result = client._graphql("query { test }")
+
+        assert result == {"data": {"result": True}}
+        assert call_count == 3
+        assert mock_sleep.call_count == 2
+        mock_sleep.assert_any_call(1)
+        mock_sleep.assert_any_call(2)
+
+    def test_retries_on_429_with_60s_wait(self, sample_config: Config) -> None:
+        client = MeetupClient(sample_config)
+        client._access_token = "fake-token"
+        client._token_expires_at = 9999999999.0
+
+        responses = [
+            MockResponse(429, text="rate limited"),
+            MockResponse(200, json_data={"data": {"ok": True}}),
+        ]
+        call_count = 0
+
+        def mock_post(*args: Any, **kwargs: Any) -> MockResponse:
+            nonlocal call_count
+            resp = responses[call_count]
+            call_count += 1
+            return resp
+
+        with patch.object(client._session, "post", side_effect=mock_post), patch("sync_meetups.time.sleep") as mock_sleep:
+            result = client._graphql("query { test }")
+
+        assert result == {"data": {"ok": True}}
+        mock_sleep.assert_called_once_with(60)
+
+    def test_returns_empty_dict_on_exhaustion(self, sample_config: Config) -> None:
+        client = MeetupClient(sample_config)
+        client._access_token = "fake-token"
+        client._token_expires_at = 9999999999.0
+
+        def mock_post(*args: Any, **kwargs: Any) -> MockResponse:
+            return MockResponse(500, text="server error")
+
+        with patch.object(client._session, "post", mock_post), patch("sync_meetups.time.sleep"):
+            result = client._graphql("query { test }", retries=3)
+
+        assert result == {}
+
+    def test_breaks_on_4xx_non_429(self, sample_config: Config) -> None:
+        client = MeetupClient(sample_config)
+        client._access_token = "fake-token"
+        client._token_expires_at = 9999999999.0
+
+        call_count = 0
+
+        def mock_post(*args: Any, **kwargs: Any) -> MockResponse:
+            nonlocal call_count
+            call_count += 1
+            return MockResponse(403, text="forbidden")
+
+        with patch.object(client._session, "post", mock_post), patch("sync_meetups.time.sleep") as mock_sleep:
+            result = client._graphql("query { test }")
+
+        assert result == {}
+        assert call_count == 1
+        mock_sleep.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# run_sync tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunSync:
+    def test_skips_network_events(self, sample_config: Config) -> None:
+        standalone_event = MeetupEvent(
+            id="100", title="Standalone", date_time=datetime.now(UTC).isoformat(),
+            duration="PT2H", event_url="https://meetup.com/e/100", description="desc",
+            group_name="test", group_urlname="test-group", event_type="PHYSICAL",
+            event_timezone="UTC", venue_name=None, venue_address=None,
+            venue_city=None, venue_country=None,
+        )
+        network_event = MeetupEvent(
+            id="200", title="Network", date_time=datetime.now(UTC).isoformat(),
+            duration="PT2H", event_url="https://meetup.com/e/200", description="desc",
+            group_name="test", group_urlname="test-group", event_type="PHYSICAL",
+            event_timezone="UTC", venue_name=None, venue_address=None,
+            venue_city=None, venue_country=None, network_event_id="net-uuid-1",
+        )
+
+        with patch.object(MeetupClient, "__init__", return_value=None), \
+             patch.object(MeetupClient, "fetch_groups", return_value=[]), \
+             patch.object(MeetupClient, "fetch_events", return_value=[standalone_event, network_event]), \
+             patch.object(DiscourseClient, "__init__", return_value=None), \
+             patch("sync_meetups.sync_event", return_value=SyncResult(event_id="100", action="created")) as mock_sync, \
+             patch("sync_meetups.time.sleep"):
+            summary = run_sync(sample_config, category=42)
+
+        assert summary.events_fetched == 2
+        assert summary.events_after_dedup == 1
+        assert summary.created == 1
+        mock_sync.assert_called_once()
+        synced_event = mock_sync.call_args[0][0]
+        assert synced_event.id == "100"
+
+    def test_catches_request_exception(self, sample_config: Config) -> None:
+        event = MeetupEvent(
+            id="100", title="Test", date_time=datetime.now(UTC).isoformat(),
+            duration="PT2H", event_url="https://meetup.com/e/100", description="desc",
+            group_name="test", group_urlname="test-group", event_type="PHYSICAL",
+            event_timezone="UTC", venue_name=None, venue_address=None,
+            venue_city=None, venue_country=None,
+        )
+
+        with patch.object(MeetupClient, "__init__", return_value=None), \
+             patch.object(MeetupClient, "fetch_groups", return_value=[]), \
+             patch.object(MeetupClient, "fetch_events", return_value=[event]), \
+             patch.object(DiscourseClient, "__init__", return_value=None), \
+             patch("sync_meetups.sync_event", side_effect=requests.RequestException("connection error")), \
+             patch("sync_meetups.time.sleep"):
+            summary = run_sync(sample_config, category=42)
+
+        assert summary.errors == 1
+        assert summary.results[0].action == "error"
+        assert summary.results[0].error == "Unexpected error"
+
+
+# ---------------------------------------------------------------------------
+# Edge case tests for real-world data scenarios
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPostBodySanitization:
+    """Verify that user-generated content from Meetup API produces valid output."""
+
+    def test_title_with_double_quotes_in_bbcode(self) -> None:
+        """Meetup organizer puts double quotes in the event title."""
+        event = MeetupEvent(
+            id="1", title='Ansible "Best Practices" Workshop',
+            date_time="2026-03-15T18:00:00.000+00:00", duration="PT2H",
+            event_url="https://meetup.com/e/1", description="A workshop.",
+            group_name="Test", group_urlname="test", event_type="PHYSICAL",
+            event_timezone="UTC", venue_name=None, venue_address=None,
+            venue_city=None, venue_country=None,
+        )
+        body = build_post_body(event)
+        assert """name="Ansible 'Best Practices' Workshop\"""" in body
+        assert '## Ansible "Best Practices" Workshop' in body
+
+    def test_url_with_parentheses_in_markdown_link(self) -> None:
+        """Event URL with closing paren doesn't break Markdown link."""
+        event = MeetupEvent(
+            id="1", title="Test",
+            date_time="2026-03-15T18:00:00.000+00:00", duration="PT2H",
+            event_url="https://meetup.com/events/123_(special)/",
+            description="Desc", group_name="Test", group_urlname="test",
+            event_type="PHYSICAL", event_timezone="UTC",
+            venue_name=None, venue_address=None, venue_city=None, venue_country=None,
+        )
+        body = build_post_body(event)
+        assert "[View event on Meetup](https://meetup.com/events/123_(special%29/)" in body
+
+    def test_url_with_double_quotes_in_bbcode(self) -> None:
+        """Event URL with double quotes doesn't break BBCode attributes."""
+        event = MeetupEvent(
+            id="1", title="Test",
+            date_time="2026-03-15T18:00:00.000+00:00", duration="PT2H",
+            event_url='https://meetup.com/e/1?ref="foo"',
+            description="Desc", group_name="Test", group_urlname="test",
+            event_type="PHYSICAL", event_timezone="UTC",
+            venue_name=None, venue_address=None, venue_city=None, venue_country=None,
+        )
+        body = build_post_body(event)
+        assert 'url="https://meetup.com/e/1?ref=\'foo\'"' in body
+
+    def test_timezone_with_double_quotes(self) -> None:
+        """Timezone containing quotes doesn't break BBCode timezone attribute."""
+        event = MeetupEvent(
+            id="1", title="Test",
+            date_time="2026-03-15T18:00:00.000+00:00", duration="PT2H",
+            event_url="https://meetup.com/e/1", description="Desc",
+            group_name="Test", group_urlname="test", event_type="PHYSICAL",
+            event_timezone='Europe/London" injected="true',
+            venue_name=None, venue_address=None, venue_city=None, venue_country=None,
+        )
+        body = build_post_body(event)
+        assert 'timezone="Europe/London\' injected=\'true"' in body
+        assert 'injected="true"' not in body
+
+    def test_minimal_event_no_description_no_venue_no_timezone(self) -> None:
+        """Bare-minimum event from API: empty description, no venue, no timezone."""
+        event = MeetupEvent(
+            id="1", title="Minimal",
+            date_time="2026-03-15T18:00:00.000+00:00", duration=None,
+            event_url="https://meetup.com/e/1", description="",
+            group_name="Test", group_urlname="test", event_type=None,
+            event_timezone=None, venue_name=None, venue_address=None,
+            venue_city=None, venue_country=None,
+        )
+        body = build_post_body(event)
+        assert "## Minimal" in body
+        assert "timezone=" not in body
+        assert "**Venue:**" not in body
+        assert "**RSVP on Meetup:**" in body
+
+
+class TestDiscourseRateLimitEdgeCases:
+    """Verify rate-limit handling with real-world edge cases."""
+
+    def test_retry_after_date_string_does_not_crash(self, sample_config: Config) -> None:
+        """Discourse sends HTTP-date format Retry-After header."""
+        discourse = DiscourseClient(sample_config, category=42)
+
+        responses = [
+            MockResponse(429, headers={"Retry-After": "Thu, 01 Jan 2026 00:00:00 GMT"}),
+            MockResponse(200, json_data={"id": 42, "post_stream": {"posts": [{"id": 1, "raw": "body"}]}}),
+        ]
+        call_count = 0
+
+        def mock_get(*args: Any, **kwargs: Any) -> MockResponse:
+            nonlocal call_count
+            resp = responses[call_count]
+            call_count += 1
+            return resp
+
+        with patch.object(discourse._session, "get", side_effect=mock_get), patch("sync_meetups.time.sleep") as mock_sleep:
+            result = discourse.lookup_topic("test-id")
+
+        assert result is not None
+        mock_sleep.assert_called_once_with(10)
+
+    def test_lookup_topic_raises_on_persistent_429(self, sample_config: Config) -> None:
+        """lookup_topic raises when both attempts are rate-limited."""
+        discourse = DiscourseClient(sample_config, category=42)
+
+        def mock_get(*args: Any, **kwargs: Any) -> MockResponse:
+            return MockResponse(429, headers={"Retry-After": "5"})
+
+        with patch.object(discourse._session, "get", side_effect=mock_get), \
+             patch("sync_meetups.time.sleep"), \
+             pytest.raises(requests.RequestException, match="status 429"):
+            discourse.lookup_topic("test-id")
+
+
+class TestRunSyncErrorPropagation:
+    """Verify that lookup failures propagate correctly through sync."""
+
+    def test_lookup_failure_counts_as_error_not_create(self, sample_config: Config) -> None:
+        """When lookup_topic raises (e.g. rate limited), sync records an error
+        instead of attempting to create a duplicate topic."""
+        event = MeetupEvent(
+            id="100", title="Test", date_time=datetime.now(UTC).isoformat(),
+            duration="PT2H", event_url="https://meetup.com/e/100", description="desc",
+            group_name="test", group_urlname="test-group", event_type="PHYSICAL",
+            event_timezone="UTC", venue_name=None, venue_address=None,
+            venue_city=None, venue_country=None,
+        )
+
+        with patch.object(MeetupClient, "__init__", return_value=None), \
+             patch.object(MeetupClient, "fetch_groups", return_value=[]), \
+             patch.object(MeetupClient, "fetch_events", return_value=[event]), \
+             patch.object(DiscourseClient, "__init__", return_value=None), \
+             patch.object(DiscourseClient, "lookup_topic", side_effect=requests.RequestException("429 rate limited")), \
+             patch.object(DiscourseClient, "create_topic") as mock_create, \
+             patch("sync_meetups.time.sleep"):
+            summary = run_sync(sample_config, category=42)
+
+        assert summary.errors == 1
+        assert summary.created == 0
+        mock_create.assert_not_called()
