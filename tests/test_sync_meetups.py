@@ -16,11 +16,13 @@ from sync_meetups import (
     MeetupClient,
     MeetupEvent,
     SyncResult,
+    SyncSummary,
     build_post_body,
     build_post_title,
     deduplicate_events,
     dump_events_table,
     filter_events,
+    main,
     parse_args,
     parse_duration,
     parse_event_datetime,
@@ -1621,7 +1623,7 @@ class TestRunSync:
             summary = run_sync(sample_config, category=42)
 
         assert summary.events_fetched == 2
-        assert summary.events_after_dedup == 1
+        assert summary.events_to_sync == 1
         assert summary.created == 1
         mock_sync.assert_called_once()
         synced_event = mock_sync.call_args[0][0]
@@ -1792,3 +1794,103 @@ class TestRunSyncErrorPropagation:
         assert summary.errors == 1
         assert summary.created == 0
         mock_create.assert_not_called()
+
+
+class TestBuildPostBodyInjectionPrevention:
+    """Tests for injection-prevention sanitization in build_post_body."""
+
+    def test_title_with_closing_bracket_in_bbcode(self) -> None:
+        event = MeetupEvent(
+            id="1", title="Ansible [Advanced] Workshop", date_time="2026-03-15T18:00:00.000+00:00",
+            duration="PT2H", event_url="https://meetup.com/e/1", description="desc",
+            group_name="test", group_urlname="test-group", event_type="PHYSICAL",
+            event_timezone="Europe/London", venue_name=None, venue_address=None,
+            venue_city=None, venue_country=None,
+        )
+        body = build_post_body(event)
+        assert 'name="Ansible [Advanced&#93; Workshop"' in body
+        assert "## Ansible [Advanced] Workshop" in body
+
+    def test_url_with_closing_bracket_in_bbcode(self) -> None:
+        event = MeetupEvent(
+            id="1", title="Test", date_time="2026-03-15T18:00:00.000+00:00",
+            duration="PT2H", event_url="https://meetup.com/e/1?x=[y]", description="desc",
+            group_name="test", group_urlname="test-group", event_type="PHYSICAL",
+            event_timezone="UTC", venue_name=None, venue_address=None,
+            venue_city=None, venue_country=None,
+        )
+        body = build_post_body(event)
+        assert 'url="https://meetup.com/e/1?x=[y%5D"' in body
+
+    def test_timezone_with_closing_bracket_in_bbcode(self) -> None:
+        event = MeetupEvent(
+            id="1", title="Test", date_time="2026-03-15T18:00:00.000+00:00",
+            duration="PT2H", event_url="https://meetup.com/e/1", description="desc",
+            group_name="test", group_urlname="test-group", event_type="PHYSICAL",
+            event_timezone="Europe/London]injected", venue_name=None, venue_address=None,
+            venue_city=None, venue_country=None,
+        )
+        body = build_post_body(event)
+        assert 'timezone="Europe/London&#93;injected"' in body
+
+    def test_bbcode_tags_stripped_from_description(self) -> None:
+        event = MeetupEvent(
+            id="1", title="Test", date_time="2026-03-15T18:00:00.000+00:00",
+            duration="PT2H", event_url="https://meetup.com/e/1",
+            description="[b]bold[/b] text [url=http://x]link[/url] end",
+            group_name="test", group_urlname="test-group", event_type="PHYSICAL",
+            event_timezone="UTC", venue_name=None, venue_address=None,
+            venue_city=None, venue_country=None,
+        )
+        body = build_post_body(event)
+        assert "[b]" not in body
+        assert "[/b]" not in body
+        assert "[url=http://x]" not in body
+        assert "bold" in body
+        assert "text" in body
+        assert "link" in body
+
+    def test_newlines_stripped_from_rsvp_url(self) -> None:
+        event = MeetupEvent(
+            id="1", title="Test", date_time="2026-03-15T18:00:00.000+00:00",
+            duration="PT2H", event_url="https://meetup.com/e/1\n/injected\r/path", description="desc",
+            group_name="test", group_urlname="test-group", event_type="PHYSICAL",
+            event_timezone="UTC", venue_name=None, venue_address=None,
+            venue_city=None, venue_country=None,
+        )
+        body = build_post_body(event)
+        assert "https://meetup.com/e/1/injected/path)" in body
+        assert "\n" not in body.split("RSVP on Meetup")[1].split("\n")[0]
+
+
+class TestMainExitCode:
+    """Tests for main() exit code behavior."""
+
+    def test_returns_1_on_sync_errors(self, sample_config: Config, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yml"
+        config_file.write_text("meetup:\n  client_key: x\n")
+        summary = SyncSummary(groups_found=1, events_fetched=5, errors=2)
+        with patch("sync_meetups.Config.from_yaml", return_value=sample_config), \
+             patch("sync_meetups.run_sync", return_value=summary):
+            result = main(["--staging", "--config", str(config_file)])
+        assert result == 1
+
+    def test_returns_0_on_success(self, sample_config: Config, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yml"
+        config_file.write_text("meetup:\n  client_key: x\n")
+        summary = SyncSummary(groups_found=1, events_fetched=5, created=3, errors=0)
+        with patch("sync_meetups.Config.from_yaml", return_value=sample_config), \
+             patch("sync_meetups.run_sync", return_value=summary):
+            result = main(["--staging", "--config", str(config_file)])
+        assert result == 0
+
+
+class TestDiscourseBaseUrlProperty:
+    """Tests for DiscourseClient.base_url property."""
+
+    def test_created_topic_url_uses_base_url(self, sample_event: MeetupEvent, sample_config: Config) -> None:
+        discourse = DiscourseClient(sample_config, category=42)
+        with patch.object(discourse, "lookup_topic", return_value=None), \
+             patch.object(discourse, "create_topic", return_value={"topic_id": 99}):
+            result = sync_event(sample_event, discourse)
+        assert result.topic_url == "https://forum.example.com/t/99"

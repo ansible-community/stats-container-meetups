@@ -1,0 +1,8 @@
+.git/
+tests/
+*.md
+config.yml
+config.yml.example
+introspect_schema.py
+.pre-commit-config.yaml
+.ruff.toml

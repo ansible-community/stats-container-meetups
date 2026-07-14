@@ -141,7 +141,7 @@ class SyncSummary:
 
     groups_found: int = 0
     events_fetched: int = 0
-    events_after_dedup: int = 0
+    events_to_sync: int = 0
     created: int = 0
     updated: int = 0
     skipped: int = 0
@@ -211,7 +211,7 @@ class MeetupClient:
         )
 
         if resp.status_code != 200:
-            log.error("Meetup auth failed (HTTP %d): %s", resp.status_code, resp.text[:200])
+            log.error("Meetup auth failed (HTTP %d)", resp.status_code)
             # Retry once
             resp = self._session.post(
                 self._config.meetup_token_url,
@@ -222,7 +222,7 @@ class MeetupClient:
                 timeout=self.REQUEST_TIMEOUT,
             )
             if resp.status_code != 200:
-                log.error("Meetup auth retry failed (HTTP %d): %s", resp.status_code, resp.text[:200])
+                log.error("Meetup auth retry failed (HTTP %d)", resp.status_code)
                 sys.exit(1)
 
         token_data = resp.json()
@@ -302,7 +302,10 @@ class MeetupClient:
 
             for edge in edges:
                 node = edge.get("node", {})
-                groups.append(MeetupGroup(id=node["id"], name=node["name"], urlname=node["urlname"]))
+                try:
+                    groups.append(MeetupGroup(id=node["id"], name=node["name"], urlname=node["urlname"]))
+                except KeyError as exc:
+                    log.warning("Skipping malformed group node (missing %s): %s", exc, node.get("id", "unknown"))
 
             page_info = search.get("pageInfo", {})
             if page_info.get("hasNextPage"):
@@ -353,26 +356,29 @@ class MeetupClient:
                 venue = node.get("venue") or {}
                 net_event = node.get("networkEvent") or {}
 
-                events.append(
-                    MeetupEvent(
-                        id=node["id"],
-                        title=node["title"],
-                        date_time=node["dateTime"],
-                        duration=node.get("duration"),
-                        event_url=node["eventUrl"],
-                        description=node.get("description", ""),
-                        group_name=group.get("name", ""),
-                        group_urlname=group.get("urlname", ""),
-                        event_type=node.get("eventType"),
-                        event_timezone=group.get("timezone"),
-                        venue_name=venue.get("name"),
-                        venue_address=venue.get("address"),
-                        venue_city=venue.get("city"),
-                        venue_country=venue.get("country"),
-                        network_event_id=net_event.get("id"),
-                        network_event_group_count=net_event.get("groupCount"),
+                try:
+                    events.append(
+                        MeetupEvent(
+                            id=node["id"],
+                            title=node["title"],
+                            date_time=node["dateTime"],
+                            duration=node.get("duration"),
+                            event_url=node["eventUrl"],
+                            description=node.get("description", ""),
+                            group_name=group.get("name", ""),
+                            group_urlname=group.get("urlname", ""),
+                            event_type=node.get("eventType"),
+                            event_timezone=group.get("timezone"),
+                            venue_name=venue.get("name"),
+                            venue_address=venue.get("address"),
+                            venue_city=venue.get("city"),
+                            venue_country=venue.get("country"),
+                            network_event_id=net_event.get("id"),
+                            network_event_group_count=net_event.get("groupCount"),
+                        )
                     )
-                )
+                except KeyError as exc:
+                    log.warning("Skipping malformed event node (missing %s): %s", exc, node.get("id", "unknown"))
 
             page_info = search.get("pageInfo", {})
             if page_info.get("hasNextPage"):
@@ -455,6 +461,10 @@ class DiscourseClient:
             }
         )
         self._base_url = config.discourse_url.rstrip("/")
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
 
     def lookup_topic(self, external_id: str) -> dict[str, Any] | None:
         """Look up a topic by external_id. Returns topic data or None if not found.
@@ -573,11 +583,11 @@ def build_post_body(event: MeetupEvent) -> str:
         end_dt = dt + duration_td
         end_iso = end_dt.isoformat(timespec="milliseconds")
 
-    safe_tz = event.event_timezone.replace('"', "'") if event.event_timezone else None
+    safe_tz = event.event_timezone.replace('"', "'").replace("]", "&#93;") if event.event_timezone else None
     tz_attr = f' timezone="{safe_tz}"' if safe_tz else ""
 
-    safe_title = event.title.replace('"', "'")
-    safe_url = event.event_url.replace('"', "'")
+    safe_title = event.title.replace('"', "'").replace("]", "&#93;")
+    safe_url = event.event_url.replace('"', "'").replace("]", "%5D")
 
     body_parts = [
         f'[event start="{start_iso}" end="{end_iso}"{tz_attr} status="public" minimal="true"' f' name="{safe_title}" url="{safe_url}"]',
@@ -587,7 +597,7 @@ def build_post_body(event: MeetupEvent) -> str:
         "",
     ]
 
-    description_md = event.description.strip()
+    description_md = re.sub(r"\[/?[a-zA-Z][^\]]*\]", "", event.description.strip())
     if description_md:
         body_parts.append(description_md)
         body_parts.append("")
@@ -604,7 +614,7 @@ def build_post_body(event: MeetupEvent) -> str:
             venue_parts.append(event.venue_country)
         body_parts.append(f"**Venue:** {', '.join(venue_parts)}")
 
-    safe_link_url = event.event_url.replace(")", "%29")
+    safe_link_url = event.event_url.replace(")", "%29").replace("\n", "").replace("\r", "")
     body_parts.append("")
     body_parts.append(f"**RSVP on Meetup:** [View event on Meetup]({safe_link_url})")
 
@@ -814,6 +824,14 @@ def validate_config(config: Config) -> bool:
                 log.warning("[SKIP] Meetup Pro Network exists (depends on: access token obtained)")
         else:
             log.error("[FAIL] Meetup token endpoint reachable: HTTP %d: %s", resp.status_code, resp.text[:200])
+            log.error(
+                "  JWT was built with: client_key (iss)=%r, signing_key_id (kid)=%r, "
+                "member_id (sub)=%r, private_key_path=%r",
+                config.meetup_client_key,
+                config.meetup_signing_key_id,
+                config.meetup_member_id,
+                config.meetup_private_key_path,
+            )
             all_passed = False
             log.warning("[SKIP] Meetup access token obtained (depends on: token endpoint reachable)")
             log.warning("[SKIP] Meetup Pro Network exists (depends on: access token obtained)")
@@ -1004,7 +1022,7 @@ def sync_event(event: MeetupEvent, discourse: DiscourseClient, external_id_prefi
         if result is None:
             return SyncResult(event_id=event.id, action="error", error="Failed to create topic")
         new_topic_id = result.get("topic_id", 0)
-        topic_url = f"{discourse._base_url}/t/{new_topic_id}" if new_topic_id else None
+        topic_url = f"{discourse.base_url}/t/{new_topic_id}" if new_topic_id else None
         log.info("[NEW] %s (topic %d) %s", external_id, new_topic_id, title)
         return SyncResult(event_id=event.id, action="created", topic_url=topic_url)
 
@@ -1022,7 +1040,7 @@ def sync_event(event: MeetupEvent, discourse: DiscourseClient, external_id_prefi
 
     if not title_changed and not body_changed:
         log.info("[NO CHANGE] %s (topic %d) %s", external_id, topic_id, title)
-        return SyncResult(event_id=event.id, action="skipped", topic_url=f"{discourse._base_url}/t/{topic_id}")
+        return SyncResult(event_id=event.id, action="skipped", topic_url=f"{discourse.base_url}/t/{topic_id}")
 
     changes = []
     if title_changed:
@@ -1041,7 +1059,7 @@ def sync_event(event: MeetupEvent, discourse: DiscourseClient, external_id_prefi
 
     if update_ok:
         log.info("[UPDATED %s] %s (topic %d) %s", "+".join(changes), external_id, topic_id, title)
-        return SyncResult(event_id=event.id, action="updated", topic_url=f"{discourse._base_url}/t/{topic_id}")
+        return SyncResult(event_id=event.id, action="updated", topic_url=f"{discourse.base_url}/t/{topic_id}")
 
     log.error("[UPDATE FAILED %s] %s (topic %d) %s", "+".join(changes), external_id, topic_id, title)
     return SyncResult(event_id=event.id, action="error", error="Update failed")
@@ -1068,7 +1086,7 @@ def run_sync(config: Config, category: int, external_id_prefix: str = "", title_
         events = [e for e in events if not e.network_event_id]
         log.info("Skipped %d network events (not yet supported)", network_count)
 
-    summary.events_after_dedup = len(events)
+    summary.events_to_sync = len(events)
 
     for event in events:
         try:
@@ -1150,10 +1168,10 @@ def main(argv: list[str] | None = None) -> int:
     summary = run_sync(config, category=category, external_id_prefix=external_id_prefix, title_prefix=title_prefix)
 
     log.info(
-        "Sync complete: groups=%d, events_fetched=%d, after_dedup=%d, created=%d, updated=%d, skipped=%d, errors=%d",
+        "Sync complete: groups=%d, events_fetched=%d, to_sync=%d, created=%d, updated=%d, skipped=%d, errors=%d",
         summary.groups_found,
         summary.events_fetched,
-        summary.events_after_dedup,
+        summary.events_to_sync,
         summary.created,
         summary.updated,
         summary.skipped,
@@ -1162,6 +1180,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if summary.events_fetched == 0 and summary.groups_found == 0:
         log.error("Critical failure: no groups or events found")
+        return 1
+
+    if summary.errors > 0:
+        log.warning("Sync completed with %d errors", summary.errors)
         return 1
 
     return 0
