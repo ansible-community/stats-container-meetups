@@ -1,19 +1,10 @@
-FROM rocker/tidyverse:latest
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        libsecret-1-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN install2.r config emayili gt patchwork pins remotes \
-    && rm -rf /tmp/downloaded_packages
-RUN R -q -e 'remotes::install_github("rladies/meetupr")'
-
-RUN mkdir -p /opt/meetupr
-WORKDIR /opt/meetupr
-COPY ./get_events.R .
-COPY ./send_email.R .
-COPY ./update_discourse.R .
-COPY ./meetup_report.Rmd .
-
-CMD ["R"]
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+# introspect_schema.py intentionally excluded — development-only tool
+COPY sync_meetups.py .
+RUN useradd --create-home meetup
+USER meetup
+ENTRYPOINT ["python", "sync_meetups.py"]
+CMD ["--config", "/config/config.yml"]
