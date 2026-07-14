@@ -1,11 +1,15 @@
+---
 # Meetup-to-Discourse Sync Configuration
 # Copy to config.yml and fill in your values.
 
 meetup:
   # OAuth2 JWT authentication (https://www.meetup.com/graphql/authentication/)
+  # https://www.meetup.com/graphql/oauth/list/ "Your Key"
   client_key: "your_oauth_client_key"
+  # https://www.meetup.com/graphql/oauth/list/ settings/Active keys IDs
   signing_key_id: "your_signing_key_id"
   private_key_path: "/config/meetup_private_key.pem"
+  # https://www.meetup.com/graphql/oauth/209275/ Path to downloaded pem
   member_id: "123456789"
   pro_network: "ansible"
   api_url: "https://api.meetup.com/gql-ext"
@@ -13,8 +17,8 @@ meetup:
 
 discourse:
   url: "https://forum.ansible.com"
-  category_staging: 42       # Sandbox category ID (staging mode)
-  category_production: 5     # Production category ID (--production mode)
+  category_staging: 14       # Sandbox category ID (staging mode)
+  category_production: 8     # Production category ID (--production mode)
   api_key: "your_discourse_api_key"
   api_user: "MeetupBot"
 
